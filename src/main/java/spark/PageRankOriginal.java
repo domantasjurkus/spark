@@ -3,8 +3,11 @@ package spark;
 import java.util.List;
 import java.io.PrintWriter;
 import java.lang.reflect.Array;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Date;
 
 import org.apache.spark.Accumulator;
 import org.apache.spark.SparkConf;
@@ -13,10 +16,32 @@ import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import com.google.common.collect.Iterables;
 import scala.Tuple2;
+import utils.ISO8601;
 
 public class PageRankOriginal {
+	
+	/** Transform ISO 8601 string to timestamp. */
+	public static long toTimeMS(final String iso8601string)
+			throws ParseException {
+		String s = iso8601string.replace("Z", "+00:00");
+		try {
+			s = s.substring(0, 22) + s.substring(23); // to get rid of the ":"
+		} catch (IndexOutOfBoundsException e) {
+			throw new ParseException("Invalid length", 0);
+		}
+		Date date = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssZ").parse(s);
 
-	public static void main(String[] args) {
+		return date.getTime();
+	}
+	
+	public static String getArticleTitle(String revision) {
+		return revision.split("\\s+")[3];
+	}
+
+	//
+	// NOTE: double-check on cluster if any timestamp parsing exceptions are thrown
+	//
+	public static void main(String[] args) throws ParseException {
 		SparkConf conf = new SparkConf();
 		conf.setAppName("PageRankOriginal");
 		
@@ -24,14 +49,45 @@ public class PageRankOriginal {
 		sc.hadoopConfiguration().set("textinputformat.record.delimiter", "\n\n");
 		JavaRDD<String> revisions = sc.textFile(args[0], 1);
 		
+		String Date = "2005-01-01T00:00:00Z";
+		long inputDate = toTimeMS(Date);
+		
 		// 39129 revisions
 		// 35266 unique articles
 		// ~700 revisions with empty MAIN
 		
 		//Accumulator<Integer> acc = sc.accumulator(0);
 		//acc.add(1);
+
+		//JavaPairRDD<String, String> filteredRevisions = revisions.mapToPair(rev ->
+		JavaRDD<String> filteredRevisions = revisions.mapToPair(rev ->
+			new Tuple2<String, String>(getArticleTitle(rev), rev)
+		).reduceByKey((rev1, rev2) -> {
+			// Find the most relevant revision based on abs(time_difference);
+			long date1 = toTimeMS(rev1.split("\\s+")[4]);
+			long date2 = toTimeMS(rev2.split("\\s+")[4]);
+			
+			if (Math.abs(date1-inputDate) < Math.abs(date2-inputDate)) {
+				return rev1;
+			}
+			return rev2;
+		}).filter(titleAndRevisionTuple -> {
+			// Filter out revisions that are in the future
+			String revisionDate = titleAndRevisionTuple._2.split("\\s+")[4];
+			long revisionTimestamp = toTimeMS(revisionDate);
+			if (revisionTimestamp > inputDate)
+				return false;
+			return true;
+		}).map(tuple -> tuple._2);
 		
-		// Make an RDD of <articleTitle, Iterable<outlink>>
+		// Debug
+		try {
+			PrintWriter writer = new PrintWriter("debug.txt", "UTF-8");
+			writer.println(filteredRevisions.count());
+			writer.close();
+		} catch (Exception e) {}
+		
+		// Make an RDD of [(articleTitle, [out, out, out]), ...]
 		JavaPairRDD<String, Iterable<String>> outlinks = revisions.mapToPair(revision -> {
 			String[] lines = revision.split("\n");
 			String articleTitle = lines[0].split("\\s+")[3];
@@ -44,20 +100,14 @@ public class PageRankOriginal {
 			}
 			
 			return new Tuple2<String, Iterable<String>>(articleTitle, Arrays.asList(mainLine));
-		}).distinct();//.groupByKey();ll
-		
-		// Debug
-		/*try {
-			PrintWriter writer = new PrintWriter("debug.txt", "UTF-8");
-			writer.println(acc.value());
-			writer.close();
-		} catch (Exception e) {}*/
+		}).distinct();//.groupByKey();
 		
 		// Give articles initial score
+		// [(articleTitle, 1.0), ...]
 		JavaPairRDD<String, Double> ranks = outlinks.mapValues(s -> 1.0);
 		
-		int numIterations = 1;
-		for (int current=0; current<numIterations; current++) {
+		int iterations = 1;
+		for (int i=0; i<iterations; i++) {
 			JavaPairRDD<String, Double> contribs = outlinks.join(ranks).values().flatMapToPair(v -> {
 				List<Tuple2<String, Double>> res = new ArrayList<Tuple2<String, Double>>();
 				int urlCount = Iterables.size(v._1);
