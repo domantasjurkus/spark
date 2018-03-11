@@ -2,7 +2,9 @@ package spark;
 
 import java.util.List;
 import java.io.PrintWriter;
+import java.lang.reflect.Array;
 import java.util.ArrayList;
+import java.util.Arrays;
 
 import org.apache.spark.Accumulator;
 import org.apache.spark.SparkConf;
@@ -22,51 +24,54 @@ public class PageRankOriginal {
 		sc.hadoopConfiguration().set("textinputformat.record.delimiter", "\n\n");
 		JavaRDD<String> revisions = sc.textFile(args[0], 1);
 		
-		// Debug
-		final Accumulator<Integer> count = sc.accumulator(0);
+		// 39129 revisions
+		// 35266 unique articles
+		// ~700 revisions with empty MAIN
 		
-		// Find article name, revision id and MAIN
-		revisions.foreach(r -> {
-			String lines[] = r.split("\n");
+		//Accumulator<Integer> acc = sc.accumulator(0);
+		//acc.add(1);
+		
+		// Make an RDD of <articleTitle, Iterable<outlink>>
+		JavaPairRDD<String, Iterable<String>> outlinks = revisions.mapToPair(revision -> {
+			String[] lines = revision.split("\n");
+			String articleTitle = lines[0].split("\\s+")[3];
 			
-			for (String line : lines) {
-				String symbols[] = line.split("\\s+");
-				if (symbols[0].equals("MAIN")) {
-					count.add(1);
-				}
+			String[] mainLine = {};
+			
+			// If MAIN is not empty
+			if (!lines[3].equals("MAIN")) {
+				mainLine = lines[3].substring(5, lines[3].length()).split("\\s+");
 			}
-		});
+			
+			return new Tuple2<String, Iterable<String>>(articleTitle, Arrays.asList(mainLine));
+		}).distinct();//.groupByKey();ll
 		
-		try {
+		// Debug
+		/*try {
 			PrintWriter writer = new PrintWriter("debug.txt", "UTF-8");
-			writer.println(count);
+			writer.println(acc.value());
 			writer.close();
-		} catch (Exception e) {}
+		} catch (Exception e) {}*/
 		
+		// Give articles initial score
+		JavaPairRDD<String, Double> ranks = outlinks.mapValues(s -> 1.0);
 		
-		// Assuming we're on line MAIN
-		JavaPairRDD<String, Iterable<String>> links = revisions.mapToPair(s -> {
-			String[] parts = s.split("\\s+");
-			return new Tuple2<String, String>(parts[0], parts[1]);
-		}).distinct().groupByKey().cache();
-		
-		JavaPairRDD<String, Double> ranks = links.mapValues(s -> 1.0);
-		
-		//int numIterations = Integer.parseInt(args[2]);
 		int numIterations = 1;
-		/*for (int current=0; current<numIterations; current++) {
-			JavaPairRDD<String, Double> contribs = links.join(ranks).values().flatMapToPair(v -> {
+		for (int current=0; current<numIterations; current++) {
+			JavaPairRDD<String, Double> contribs = outlinks.join(ranks).values().flatMapToPair(v -> {
 				List<Tuple2<String, Double>> res = new ArrayList<Tuple2<String, Double>>();
 				int urlCount = Iterables.size(v._1);
 				for (String s : v._1)
 					res.add(new Tuple2<String, Double>(s, v._2() / urlCount));
 				return res;
 			});
-			ranks = contribs.reduceByKey((a, b) -> a + b).mapValues(v -> 0.15 + v * 0.85);
+			ranks = contribs.reduceByKey((a, b) -> a + b).mapValues(v -> 0.15 + v*0.85);
 		}
 		
-		List<Tuple2<String, Double>> output = ranks.collect();
+		//List<Tuple2<String, Double>> output = ranks.collect();
 		
-		ranks.saveAsTextFile(args[1]);*/
+		ranks.saveAsTextFile(args[1]);
+		
+		sc.close();
 	}
 }
