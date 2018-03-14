@@ -7,6 +7,7 @@ import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Date;
 
 import org.apache.spark.Accumulator;
@@ -37,6 +38,14 @@ public class PageRankOriginal {
 	public static String getArticleTitle(String revision) {
 		return revision.split("\\s+")[3];
 	}
+	
+	public static <T> void debug(T s) {		
+		try {	
+			PrintWriter writer = new PrintWriter("debug.txt", "UTF-8");
+			writer.println(s);
+			writer.close();
+		} catch (Exception e) {}
+	}
 
 	//
 	// NOTE: double-check on cluster if any timestamp parsing exceptions are thrown
@@ -49,7 +58,7 @@ public class PageRankOriginal {
 		sc.hadoopConfiguration().set("textinputformat.record.delimiter", "\n\n");
 		JavaRDD<String> revisions = sc.textFile(args[0], 1);
 		
-		String Date = "2005-01-01T00:00:00Z";
+		String Date = "2010-01-01T00:00:00Z";
 		long inputDate = toTimeMS(Date);
 		
 		// 39129 revisions
@@ -59,36 +68,46 @@ public class PageRankOriginal {
 		//Accumulator<Integer> acc = sc.accumulator(0);
 		//acc.add(1);
 
-		//JavaPairRDD<String, String> filteredRevisions = revisions.mapToPair(rev ->
-		JavaRDD<String> filteredRevisions = revisions.mapToPair(rev ->
-			new Tuple2<String, String>(getArticleTitle(rev), rev)
-		).reduceByKey((rev1, rev2) -> {
+		// Change this to flatMapToPair so that you can filter out future revisions earlier
+		//revisions = revisions.mapToPair(rev -> {
+		revisions = revisions.flatMapToPair(rev -> {
+			
+			// if date in future, return Collections.emptyList();
+			long date = toTimeMS(rev.split("\\s+")[4]);
+			if (date > inputDate) {
+				return Collections.emptyList();
+			}
+			
+			return Collections.singleton(new Tuple2<String, String>(getArticleTitle(rev), rev));
+		}).reduceByKey((rev1, rev2) -> {
 			// Find the most relevant revision based on abs(time_difference);
 			long date1 = toTimeMS(rev1.split("\\s+")[4]);
 			long date2 = toTimeMS(rev2.split("\\s+")[4]);
 			
-			if (Math.abs(date1-inputDate) < Math.abs(date2-inputDate)) {
+			if (date1 > date2) {
 				return rev1;
 			}
+			
+			/*if (Math.abs(date1-inputDate) < Math.abs(date2-inputDate)) {
+				return rev1;
+			}*/
 			return rev2;
-		}).filter(titleAndRevisionTuple -> {
+		})
+		
+		/*.filter(titleAndRevisionTuple -> {
 			// Filter out revisions that are in the future
 			String revisionDate = titleAndRevisionTuple._2.split("\\s+")[4];
 			long revisionTimestamp = toTimeMS(revisionDate);
 			if (revisionTimestamp > inputDate)
 				return false;
 			return true;
-		}).map(tuple -> tuple._2);
+		})*/
+		.map(tuple -> tuple._2);
 		
-		// Debug
-		try {
-			PrintWriter writer = new PrintWriter("debug.txt", "UTF-8");
-			writer.println(filteredRevisions.count());
-			writer.close();
-		} catch (Exception e) {}
+		debug(revisions.count());
 		
 		// Make an RDD of [(articleTitle, [out, out, out]), ...]
-		JavaPairRDD<String, Iterable<String>> outlinks = revisions.mapToPair(revision -> {
+		/*JavaPairRDD<String, Iterable<String>> outlinks = revisions.mapToPair(revision -> {
 			String[] lines = revision.split("\n");
 			String articleTitle = lines[0].split("\\s+")[3];
 			
@@ -116,11 +135,12 @@ public class PageRankOriginal {
 				return res;
 			});
 			ranks = contribs.reduceByKey((a, b) -> a + b).mapValues(v -> 0.15 + v*0.85);
-		}
+		}*/
 		
 		//List<Tuple2<String, Double>> output = ranks.collect();
 		
-		ranks.saveAsTextFile(args[1]);
+		//ranks.saveAsTextFile(args[1]);
+		revisions.saveAsTextFile(args[1]);
 		
 		sc.close();
 	}
