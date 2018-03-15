@@ -1,6 +1,7 @@
 package spark;
 
 import java.util.List;
+import java.util.Set;
 import java.io.PrintWriter;
 import java.lang.reflect.Array;
 import java.text.ParseException;
@@ -9,6 +10,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
+import java.util.HashSet;
 
 import org.apache.spark.Accumulator;
 import org.apache.spark.SparkConf;
@@ -17,7 +19,6 @@ import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import com.google.common.collect.Iterables;
 import scala.Tuple2;
-import utils.ISO8601;
 
 public class PageRankOriginal {
 	
@@ -39,20 +40,20 @@ public class PageRankOriginal {
 		return revision.split("\\s+")[3];
 	}
 	
-	public static <T> void debug(T s) {		
-		try {	
-			PrintWriter writer = new PrintWriter("debug.txt", "UTF-8");
-			writer.println(s);
-			writer.close();
-		} catch (Exception e) {}
+	public static String getRevisionDate(String revision) {
+		return revision.split("\\s+")[4];
 	}
-
+	
 	//
 	// NOTE: double-check on cluster if any timestamp parsing exceptions are thrown
 	//
 	public static void main(String[] args) throws ParseException {
 		SparkConf conf = new SparkConf();
 		conf.setAppName("PageRankOriginal");
+		
+		PrintWriter w = null;
+		try {w = new PrintWriter("debug.txt", "UTF-8");}
+		catch (Exception e) {}
 		
 		JavaSparkContext sc = new JavaSparkContext(conf);
 		sc.hadoopConfiguration().set("textinputformat.record.delimiter", "\n\n");
@@ -68,62 +69,57 @@ public class PageRankOriginal {
 		//Accumulator<Integer> acc = sc.accumulator(0);
 		//acc.add(1);
 
-		// Change this to flatMapToPair so that you can filter out future revisions earlier
-		//revisions = revisions.mapToPair(rev -> {
+		// Get rid of future revisions
 		revisions = revisions.flatMapToPair(rev -> {
-			
-			// if date in future, return Collections.emptyList();
-			long date = toTimeMS(rev.split("\\s+")[4]);
+			long date = toTimeMS(getRevisionDate(rev));
 			if (date > inputDate) {
 				return Collections.emptyList();
 			}
 			
+			// We need to do this due to requirement to return immutable object
 			return Collections.singleton(new Tuple2<String, String>(getArticleTitle(rev), rev));
+		// Get rid of past revisions
 		}).reduceByKey((rev1, rev2) -> {
-			// Find the most relevant revision based on abs(time_difference);
-			long date1 = toTimeMS(rev1.split("\\s+")[4]);
-			long date2 = toTimeMS(rev2.split("\\s+")[4]);
+			long date1 = toTimeMS(getRevisionDate(rev1));
+			long date2 = toTimeMS(getRevisionDate(rev2));
 			
-			if (date1 > date2) {
-				return rev1;
-			}
-			
-			/*if (Math.abs(date1-inputDate) < Math.abs(date2-inputDate)) {
-				return rev1;
-			}*/
-			return rev2;
-		})
+			return (date1 > date2) ? rev1 : rev2;
+		}).map(tuple -> tuple._2);
 		
-		/*.filter(titleAndRevisionTuple -> {
-			// Filter out revisions that are in the future
-			String revisionDate = titleAndRevisionTuple._2.split("\\s+")[4];
-			long revisionTimestamp = toTimeMS(revisionDate);
-			if (revisionTimestamp > inputDate)
-				return false;
-			return true;
-		})*/
-		.map(tuple -> tuple._2);
-		
-		debug(revisions.count());
-		
-		// Make an RDD of [(articleTitle, [out, out, out]), ...]
-		/*JavaPairRDD<String, Iterable<String>> outlinks = revisions.mapToPair(revision -> {
+		JavaPairRDD<String, Iterable<String>> outlinks = revisions.flatMapToPair(revision -> {
 			String[] lines = revision.split("\n");
-			String articleTitle = lines[0].split("\\s+")[3];
+			String articleTitle = getArticleTitle(lines[0]);
 			
-			String[] mainLine = {};
-			
-			// If MAIN is not empty
-			if (!lines[3].equals("MAIN")) {
-				mainLine = lines[3].substring(5, lines[3].length()).split("\\s+");
+			// If MAIN is empty (no outlinks)
+			if (lines[3].equals("MAIN")) {
+				return Collections.emptyList();
 			}
+			String[] mainLine = lines[3].substring(5, lines[3].length()).split("\\s+");
 			
-			return new Tuple2<String, Iterable<String>>(articleTitle, Arrays.asList(mainLine));
-		}).distinct();//.groupByKey();
+			// Get rid of dupes and self
+			Set<String> outs = new HashSet<>(Arrays.asList(mainLine));
+			if (outs.contains(articleTitle)) outs.remove(articleTitle);
+			
+			if (outs.isEmpty()) return Collections.emptyList();
+			
+			return Collections.singleton(new Tuple2<String, Iterable<String>>(articleTitle, outs));
+		});
 		
-		// Give articles initial score
-		// [(articleTitle, 1.0), ...]
-		JavaPairRDD<String, Double> ranks = outlinks.mapValues(s -> 1.0);
+		// Give articles initial ranks
+		JavaPairRDD<String, Double> articleRanks = revisions.mapToPair(revision -> {
+			return new Tuple2<String, Double>(getArticleTitle(revision), 1.0);
+		});
+		
+		// Give outlinks initial ranks
+		JavaPairRDD<String, Double> ranks = outlinks.flatMapToPair(tuple -> {
+			List<Tuple2<String, Double>> ret = new ArrayList<Tuple2<String, Double>>();
+			for (String out : tuple._2) {
+				ret.add(new Tuple2<String, Double>(out, 1.0));
+			}
+			return ret;
+		}).union(articleRanks);
+		
+		ranks.saveAsTextFile(args[1]);
 		
 		int iterations = 1;
 		for (int i=0; i<iterations; i++) {
@@ -135,13 +131,14 @@ public class PageRankOriginal {
 				return res;
 			});
 			ranks = contribs.reduceByKey((a, b) -> a + b).mapValues(v -> 0.15 + v*0.85);
-		}*/
+		}
+		
+		// Add tuples with inlinkless articles with a score of 0.15
+		// TODO
 		
 		//List<Tuple2<String, Double>> output = ranks.collect();
 		
-		//ranks.saveAsTextFile(args[1]);
-		revisions.saveAsTextFile(args[1]);
-		
+		w.close();
 		sc.close();
 	}
 }
