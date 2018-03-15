@@ -17,6 +17,8 @@ import org.apache.spark.SparkConf;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
+
+import com.google.common.base.Optional;
 import com.google.common.collect.Iterables;
 import scala.Tuple2;
 
@@ -89,19 +91,21 @@ public class PageRankOriginal {
 		JavaPairRDD<String, Iterable<String>> outlinks = revisions.flatMapToPair(revision -> {
 			String[] lines = revision.split("\n");
 			String articleTitle = getArticleTitle(lines[0]);
+			Set<String> outs = new HashSet<>();
 			
-			// If MAIN is empty (no outlinks)
-			if (lines[3].equals("MAIN")) {
-				return Collections.emptyList();
+			// If MAIN is not empty (no outlinks)
+			if (!lines[3].equals("MAIN")) {
+				String[] mainLine = lines[3].substring(5, lines[3].length()).split("\\s+");
+				outs.addAll(Arrays.asList(mainLine));
 			}
-			String[] mainLine = lines[3].substring(5, lines[3].length()).split("\\s+");
-			
-			// Get rid of dupes and self
-			Set<String> outs = new HashSet<>(Arrays.asList(mainLine));
+
+			// Remove self reference
 			if (outs.contains(articleTitle)) outs.remove(articleTitle);
 			
 			return Collections.singleton(new Tuple2<String, Iterable<String>>(articleTitle, outs));
 		});
+		
+		//outlinks.saveAsTextFile(args[1]);
 		
 		// Give revisions and outlinks initial ranks
 		JavaPairRDD<String, Double> ranks = outlinks.flatMapToPair(tuple -> {
@@ -111,17 +115,44 @@ public class PageRankOriginal {
 			}
 			ret.add(new Tuple2<String, Double>(tuple._1, 1.0));
 			return ret;
-		}).distinct();
+		}).distinct();		
 		
+		//JavaPairRDD<String, Tuple2<Optional<Double>, Optional<Iterable<String>>>> ranksAndLinks = ranks.fullOuterJoin(outlinks);
+		//ranksAndLinks.saveAsTextFile(args[1]);
+		
+		// Update contributions to outlinks
 		int iterations = 1;
 		for (int i=0; i<iterations; i++) {
-			JavaPairRDD<String, Double> contribs = outlinks.join(ranks).values().flatMapToPair(v -> {
+			JavaPairRDD<String, Tuple2<Optional<Double>, Optional<Iterable<String>>>> ranksAndLinks = ranks.fullOuterJoin(outlinks);
+			
+			JavaPairRDD<String, Double> contribs = ranksAndLinks.flatMapToPair(tuple -> {
+				List<Tuple2<String, Double>> res = new ArrayList<Tuple2<String, Double>>();
+				
+				String articleTitle = tuple._1();
+				Double currentRank = tuple._2._1().get();
+
+				// Release 0.0 for article name
+				res.add(new Tuple2<String, Double>(articleTitle, 0.0));
+				
+				// If article has outlinks
+				if (tuple._2._2.isPresent()) {
+					int outlinkCount = Iterables.size(tuple._2._2.get());
+					for (String out : tuple._2._2.get()) {
+						res.add(new Tuple2<String, Double>(out, currentRank/outlinkCount));
+					}
+				}
+				
+				return res;
+			});
+			
+			/*JavaPairRDD<String, Double> contribs = outlinks.join(ranks).values().flatMapToPair(v -> {
 				List<Tuple2<String, Double>> res = new ArrayList<Tuple2<String, Double>>();
 				int urlCount = Iterables.size(v._1);
 				for (String s : v._1)
 					res.add(new Tuple2<String, Double>(s, v._2() / urlCount));
 				return res;
-			});
+			});*/
+
 			ranks = contribs.reduceByKey((a, b) -> a + b).mapValues(v -> 0.15 + v*0.85);
 		}
 		ranks.saveAsTextFile(args[1]);
