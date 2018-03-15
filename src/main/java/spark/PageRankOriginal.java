@@ -121,7 +121,7 @@ public class PageRankOriginal {
 		//ranksAndLinks.saveAsTextFile(args[1]);
 		
 		// Update contributions to outlinks
-		int iterations = 1;
+		int iterations = 5;
 		for (int i=0; i<iterations; i++) {
 			JavaPairRDD<String, Tuple2<Optional<Double>, Optional<Iterable<String>>>> ranksAndLinks = ranks.fullOuterJoin(outlinks);
 			
@@ -144,19 +144,16 @@ public class PageRankOriginal {
 				
 				return res;
 			});
-			
-			/*JavaPairRDD<String, Double> contribs = outlinks.join(ranks).values().flatMapToPair(v -> {
-				List<Tuple2<String, Double>> res = new ArrayList<Tuple2<String, Double>>();
-				int urlCount = Iterables.size(v._1);
-				for (String s : v._1)
-					res.add(new Tuple2<String, Double>(s, v._2() / urlCount));
-				return res;
-			});*/
 
 			ranks = contribs.reduceByKey((a, b) -> a + b).mapValues(v -> 0.15 + v*0.85);
 		}
-		ranks.saveAsTextFile(args[1]);
 		
+		// Sort
+		ranks = ranks.mapToPair(tuple -> new Tuple2<Double, String>(tuple._2, tuple._1))
+				.sortByKey(false)
+				.mapToPair(tuple -> new Tuple2<String, Double>(tuple._2, tuple._1));
+		
+		ranks.saveAsTextFile(args[1]);
 		w.close();
 		sc.close();
 	}
