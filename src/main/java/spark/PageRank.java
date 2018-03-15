@@ -92,7 +92,7 @@ public class PageRank {
 			}
 			ret.add(new Tuple2<String, Double>(tuple._1, 1.0));
 			return ret;
-		}).distinct();		
+		}).distinct();
 		
 		// Update contributions to outlinks
 		for (int i=0; i<iterations; i++) {
