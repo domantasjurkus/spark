@@ -100,26 +100,18 @@ public class PageRankOriginal {
 			Set<String> outs = new HashSet<>(Arrays.asList(mainLine));
 			if (outs.contains(articleTitle)) outs.remove(articleTitle);
 			
-			if (outs.isEmpty()) return Collections.emptyList();
-			
 			return Collections.singleton(new Tuple2<String, Iterable<String>>(articleTitle, outs));
 		});
 		
-		// Give articles initial ranks
-		JavaPairRDD<String, Double> articleRanks = revisions.mapToPair(revision -> {
-			return new Tuple2<String, Double>(getArticleTitle(revision), 1.0);
-		});
-		
-		// Give outlinks initial ranks
+		// Give revisions and outlinks initial ranks
 		JavaPairRDD<String, Double> ranks = outlinks.flatMapToPair(tuple -> {
 			List<Tuple2<String, Double>> ret = new ArrayList<Tuple2<String, Double>>();
 			for (String out : tuple._2) {
 				ret.add(new Tuple2<String, Double>(out, 1.0));
 			}
+			ret.add(new Tuple2<String, Double>(tuple._1, 1.0));
 			return ret;
-		}).union(articleRanks);
-		
-		ranks.saveAsTextFile(args[1]);
+		}).distinct();
 		
 		int iterations = 1;
 		for (int i=0; i<iterations; i++) {
@@ -132,11 +124,7 @@ public class PageRankOriginal {
 			});
 			ranks = contribs.reduceByKey((a, b) -> a + b).mapValues(v -> 0.15 + v*0.85);
 		}
-		
-		// Add tuples with inlinkless articles with a score of 0.15
-		// TODO
-		
-		//List<Tuple2<String, Double>> output = ranks.collect();
+		ranks.saveAsTextFile(args[1]);
 		
 		w.close();
 		sc.close();
